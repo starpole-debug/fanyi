@@ -1,5 +1,7 @@
 # Translator Control Center
 
+> 触发一次部署校验：文档微调，不影响功能。
+
 这是把旧 Flask 翻译小工具重构成的一个更适合 Vercel 的版本。
 
 ## 这次重构解决了什么
