@@ -108,6 +108,7 @@ export async function getSettings(): Promise<AppSettings> {
     return db.settings;
   }
 
+  await initializeStorage();
   const sql = getSqlClient();
   try {
     const rows = await sql<{ settings_value: AppSettings }[]>`
@@ -117,6 +118,9 @@ export async function getSettings(): Promise<AppSettings> {
       limit 1
     `;
     return rows[0]?.settings_value ?? getDefaultSettings();
+  } catch (error) {
+    console.error("[storage.getSettings] postgres query failed, fallback to defaults", error);
+    return getDefaultSettings();
   } finally {
     await sql.end();
   }

@@ -3,6 +3,8 @@ import { getConfiguredProviders } from "@/lib/providers";
 import { getSettings } from "@/lib/storage";
 import { TranslatorForm } from "@/components/translator-form";
 
+export const dynamic = "force-dynamic";
+
 export default async function HomePage() {
   const settings = await getSettings();
   const providers = getConfiguredProviders();
