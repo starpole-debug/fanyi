@@ -4,10 +4,16 @@ import { requireAdmin } from "@/lib/auth";
 import { getConfiguredProviders, PROVIDERS } from "@/lib/providers";
 import { getSettings, initializeStorage, listTranslations } from "@/lib/storage";
 
-export default async function AdminPage() {
+type AdminPageProps = {
+  searchParams?: Promise<{ saved?: string }>;
+};
+
+export default async function AdminPage({ searchParams }: AdminPageProps) {
   await requireAdmin();
   await initializeStorage();
 
+  const query = searchParams ? await searchParams : undefined;
+  const saved = query?.saved;
   const settings = await getSettings();
   const translations = await listTranslations();
   const configuredProviders = getConfiguredProviders();
@@ -34,6 +40,8 @@ export default async function AdminPage() {
       <div className="admin-layout">
         <section className="section">
           <h2>AI 设置</h2>
+          {saved === "1" ? <div className="callout callout-success">后台设置已保存。</div> : null}
+          {saved === "0" ? <div className="callout callout-danger">保存失败，请稍后重试。</div> : null}
           <form action={updateSettingsAction} className="field-grid">
             <div className="field">
               <label htmlFor="selectedProvider">当前提供商</label>

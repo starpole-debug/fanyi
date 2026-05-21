@@ -14,20 +14,26 @@ export async function logoutAction() {
 export async function updateSettingsAction(formData: FormData) {
   await requireAdmin();
 
-  await saveSettings({
-    selectedProvider: String(formData.get("selectedProvider")) as ProviderKey,
-    customProviderLabel: String(formData.get("customProviderLabel") || "").trim(),
-    customBaseUrl: String(formData.get("customBaseUrl") || "").trim(),
-    customApiKeyEnv: String(formData.get("customApiKeyEnv") || "").trim(),
-    translateModel: String(formData.get("translateModel") || "").trim(),
-    polishModel: String(formData.get("polishModel") || "").trim(),
-    scoringModel: String(formData.get("scoringModel") || "").trim(),
-    systemPrompt: String(formData.get("systemPrompt") || "").trim(),
-    adminThemeNote: String(formData.get("adminThemeNote") || "").trim()
-  });
+  try {
+    await saveSettings({
+      selectedProvider: String(formData.get("selectedProvider")) as ProviderKey,
+      customProviderLabel: String(formData.get("customProviderLabel") || "").trim(),
+      customBaseUrl: String(formData.get("customBaseUrl") || "").trim(),
+      customApiKeyEnv: String(formData.get("customApiKeyEnv") || "").trim(),
+      translateModel: String(formData.get("translateModel") || "").trim(),
+      polishModel: String(formData.get("polishModel") || "").trim(),
+      scoringModel: String(formData.get("scoringModel") || "").trim(),
+      systemPrompt: String(formData.get("systemPrompt") || "").trim(),
+      adminThemeNote: String(formData.get("adminThemeNote") || "").trim()
+    });
 
-  revalidatePath("/");
-  revalidatePath("/admin");
+    revalidatePath("/");
+    revalidatePath("/admin");
+    redirect("/admin?saved=1");
+  } catch (error) {
+    console.error("[admin.updateSettingsAction] save failed", error);
+    redirect("/admin?saved=0");
+  }
 }
 
 export async function reviewTranslationAction(formData: FormData) {
