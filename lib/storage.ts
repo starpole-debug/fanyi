@@ -9,7 +9,15 @@ type JsonDb = {
   translations: TranslationRecord[];
 };
 
-const dataDir = path.join(process.cwd(), ".data");
+function resolveDataDir() {
+  // Vercel serverless runtime has a read-only app directory; /tmp is writable.
+  if (process.env.VERCEL) {
+    return "/tmp/translator-data";
+  }
+  return path.join(process.cwd(), ".data");
+}
+
+const dataDir = resolveDataDir();
 const dataFile = path.join(dataDir, "translator-db.json");
 
 function nowIso() {
