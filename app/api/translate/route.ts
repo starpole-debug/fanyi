@@ -26,6 +26,7 @@ export async function POST(request: Request) {
     return NextResponse.json(record);
   } catch (error) {
     const message = error instanceof Error ? error.message : "翻译失败。";
+    console.error("[api.translate] translate failed", error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

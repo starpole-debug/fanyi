@@ -9,6 +9,44 @@ function parseJson<T>(content: string): T {
   return JSON.parse(content) as T;
 }
 
+function extractMessageText(response: unknown): string {
+  const choice = (response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0];
+  const content = choice?.message?.content;
+
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (
+          part &&
+          typeof part === "object" &&
+          "text" in part &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          return (part as { text: string }).text;
+        }
+
+        return "";
+      })
+      .join("")
+      .trim();
+
+    if (text) {
+      return text;
+    }
+  }
+
+  console.error("[ai.extractMessageText] unexpected provider response", response);
+  throw new Error("模型返回格式不兼容：没有找到可读取的文本结果。请检查第三方接口是否兼容 OpenAI Chat Completions。");
+}
+
 async function buildClient() {
   const settings = await getSettings();
   const presetProvider = getProvider(settings.selectedProvider);
@@ -66,7 +104,7 @@ export async function translateText(input: {
     ]
   });
 
-  const outputText = response.choices[0]?.message?.content?.trim();
+  const outputText = extractMessageText(response);
   if (!outputText) {
     throw new Error("模型没有返回翻译结果。");
   }
@@ -107,7 +145,7 @@ export async function polishText(input: { text: string; style: string }) {
     ]
   });
 
-  const content = response.choices[0]?.message?.content?.trim();
+  const content = extractMessageText(response);
   if (!content) {
     throw new Error("模型没有返回润色结果。");
   }
@@ -139,7 +177,7 @@ export async function scoreTranslation(input: {
     ]
   });
 
-  const content = response.choices[0]?.message?.content?.trim();
+  const content = extractMessageText(response);
   if (!content) {
     throw new Error("模型没有返回评分结果。");
   }
