@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import { getDefaultSettings } from "@/lib/defaults";
 import { getProvider } from "@/lib/providers";
@@ -9,8 +8,74 @@ function parseJson<T>(content: string): T {
   return JSON.parse(content) as T;
 }
 
+type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+type ChatCompletionRequest = {
+  model: string;
+  temperature?: number;
+  response_format?: { type: string };
+  messages: ChatMessage[];
+};
+
+type ProviderConfig = {
+  label: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+};
+
+function extractTextFromArrayContent(content: unknown[]): string {
+  const text = content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+
+      if (
+        part &&
+        typeof part === "object" &&
+        "text" in part &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        return (part as { text: string }).text;
+      }
+
+      if (
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
+        (part as { type?: unknown }).type === "output_text" &&
+        "text" in part &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        return (part as { text: string }).text;
+      }
+
+      return "";
+    })
+    .join("")
+    .trim();
+
+  return text;
+}
+
 function extractMessageText(response: unknown): string {
-  const choice = (response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0];
+  const responseLike = response as {
+    choices?: Array<{
+      message?: { content?: unknown };
+      text?: unknown;
+    }>;
+    output_text?: unknown;
+    output?: Array<{
+      content?: unknown[];
+    }>;
+    data?: Array<{
+      text?: unknown;
+    }>;
+  };
+  const choice = responseLike?.choices?.[0];
   const content = choice?.message?.content;
 
   if (typeof content === "string") {
@@ -18,39 +83,40 @@ function extractMessageText(response: unknown): string {
   }
 
   if (Array.isArray(content)) {
-    const text = content
-      .map((part) => {
-        if (typeof part === "string") {
-          return part;
-        }
-
-        if (
-          part &&
-          typeof part === "object" &&
-          "text" in part &&
-          typeof (part as { text?: unknown }).text === "string"
-        ) {
-          return (part as { text: string }).text;
-        }
-
-        return "";
-      })
-      .join("")
-      .trim();
-
+    const text = extractTextFromArrayContent(content);
     if (text) {
       return text;
     }
+  }
+
+  if (typeof choice?.text === "string" && choice.text.trim()) {
+    return choice.text.trim();
+  }
+
+  if (typeof responseLike?.output_text === "string" && responseLike.output_text.trim()) {
+    return responseLike.output_text.trim();
+  }
+
+  const outputContent = responseLike?.output?.[0]?.content;
+  if (Array.isArray(outputContent)) {
+    const text = extractTextFromArrayContent(outputContent);
+    if (text) {
+      return text;
+    }
+  }
+
+  if (typeof responseLike?.data?.[0]?.text === "string" && responseLike.data[0].text.trim()) {
+    return responseLike.data[0].text.trim();
   }
 
   console.error("[ai.extractMessageText] unexpected provider response", response);
   throw new Error("模型返回格式不兼容：没有找到可读取的文本结果。请检查第三方接口是否兼容 OpenAI Chat Completions。");
 }
 
-async function buildClient() {
+async function buildProviderConfig() {
   const settings = await getSettings();
   const presetProvider = getProvider(settings.selectedProvider);
-  const provider =
+  const provider: ProviderConfig =
     settings.selectedProvider === "custom"
       ? {
           ...presetProvider,
@@ -71,12 +137,124 @@ async function buildClient() {
     throw new Error("当前提供商缺少 Base URL，请先去后台补上。");
   }
 
-  const client = new OpenAI({
-    apiKey,
-    baseURL: provider.baseUrl
+  return { apiKey, provider, settings };
+}
+
+function normalizeBaseUrl(baseUrl: string) {
+  return baseUrl.replace(/\/+$/, "");
+}
+
+async function parseSseResponse(responseText: string) {
+  let aggregatedText = "";
+  const usageChunks: unknown[] = [];
+
+  for (const block of responseText.split("\n\n")) {
+    const line = block
+      .split("\n")
+      .map((part) => part.trim())
+      .find((part) => part.startsWith("data:"));
+
+    if (!line) {
+      continue;
+    }
+
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(payload) as {
+        choices?: Array<{
+          delta?: { content?: string; role?: string };
+          message?: { content?: string };
+        }>;
+        usage?: unknown;
+      };
+
+      const deltaContent = parsed.choices?.[0]?.delta?.content;
+      const messageContent = parsed.choices?.[0]?.message?.content;
+
+      if (typeof deltaContent === "string") {
+        aggregatedText += deltaContent;
+      }
+
+      if (typeof messageContent === "string") {
+        aggregatedText += messageContent;
+      }
+
+      if (parsed.usage) {
+        usageChunks.push(parsed.usage);
+      }
+    } catch (error) {
+      console.error("[ai.parseSseResponse] failed to parse SSE chunk", { payload, error });
+    }
+  }
+
+  if (!aggregatedText.trim()) {
+    console.error("[ai.parseSseResponse] empty SSE content", {
+      preview: responseText.slice(0, 1000),
+      usageChunks
+    });
+    throw new Error("上游接口返回了流式响应，但没有实际文本内容。请检查中转站该模型的 OpenAI Chat 通道是否正常。");
+  }
+
+  return aggregatedText.trim();
+}
+
+async function createChatCompletion(
+  provider: ProviderConfig,
+  apiKey: string,
+  payload: ChatCompletionRequest
+) {
+  const response = await fetch(`${normalizeBaseUrl(provider.baseUrl)}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream"
+    },
+    body: JSON.stringify({
+      ...payload,
+      stream: false
+    }),
+    cache: "no-store"
   });
 
-  return { client, provider, settings };
+  const contentType = response.headers.get("content-type") || "";
+  const rawText = await response.text();
+
+  if (!response.ok) {
+    console.error("[ai.createChatCompletion] upstream request failed", {
+      provider: provider.label,
+      status: response.status,
+      contentType,
+      body: rawText.slice(0, 2000)
+    });
+
+    try {
+      const parsed = JSON.parse(rawText) as { error?: { message?: string } };
+      throw new Error(parsed.error?.message || `上游接口请求失败，状态码 ${response.status}。`);
+    } catch {
+      throw new Error(`上游接口请求失败，状态码 ${response.status}。`);
+    }
+  }
+
+  if (contentType.includes("text/event-stream")) {
+    return parseSseResponse(rawText);
+  }
+
+  try {
+    return extractMessageText(JSON.parse(rawText));
+  } catch (error) {
+    console.error("[ai.createChatCompletion] failed to parse non-stream response", {
+      provider: provider.label,
+      contentType,
+      body: rawText.slice(0, 2000),
+      error
+    });
+    throw error;
+  }
 }
 
 export async function translateText(input: {
@@ -85,14 +263,14 @@ export async function translateText(input: {
   targetLanguage: string;
   contextText?: string;
 }) {
-  const { client, settings } = await buildClient();
+  const { apiKey, provider, settings } = await buildProviderConfig();
   const systemPrompt = settings.systemPrompt || getDefaultSettings().systemPrompt;
 
   const contextBlock = input.contextText?.trim()
     ? `\n\n【上下文】\n${input.contextText.trim()}`
     : "";
 
-  const response = await client.chat.completions.create({
+  const outputText = await createChatCompletion(provider, apiKey, {
     model: settings.translateModel,
     temperature: 0.3,
     messages: [
@@ -103,8 +281,6 @@ export async function translateText(input: {
       }
     ]
   });
-
-  const outputText = extractMessageText(response);
   if (!outputText) {
     throw new Error("模型没有返回翻译结果。");
   }
@@ -127,8 +303,8 @@ export async function translateText(input: {
 }
 
 export async function polishText(input: { text: string; style: string }) {
-  const { client, settings } = await buildClient();
-  const response = await client.chat.completions.create({
+  const { apiKey, provider, settings } = await buildProviderConfig();
+  const content = await createChatCompletion(provider, apiKey, {
     model: settings.polishModel,
     response_format: { type: "json_object" },
     temperature: 0.4,
@@ -144,8 +320,6 @@ export async function polishText(input: { text: string; style: string }) {
       }
     ]
   });
-
-  const content = extractMessageText(response);
   if (!content) {
     throw new Error("模型没有返回润色结果。");
   }
@@ -159,8 +333,8 @@ export async function scoreTranslation(input: {
   sourceLanguage: string;
   targetLanguage: string;
 }) {
-  const { client, settings } = await buildClient();
-  const response = await client.chat.completions.create({
+  const { apiKey, provider, settings } = await buildProviderConfig();
+  const content = await createChatCompletion(provider, apiKey, {
     model: settings.scoringModel,
     response_format: { type: "json_object" },
     temperature: 0.2,
@@ -176,8 +350,6 @@ export async function scoreTranslation(input: {
       }
     ]
   });
-
-  const content = extractMessageText(response);
   if (!content) {
     throw new Error("模型没有返回评分结果。");
   }
