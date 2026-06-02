@@ -191,21 +191,14 @@ async function parseSseResponse(responseText: string) {
     }
   }
 
-  if (!aggregatedText.trim()) {
-    console.error("[ai.parseSseResponse] empty SSE content", {
-      preview: responseText.slice(0, 1000),
-      usageChunks
-    });
-    throw new Error("上游接口返回了流式响应，但没有实际文本内容。请检查中转站该模型的 OpenAI Chat 通道是否正常。");
-  }
-
   return aggregatedText.trim();
 }
 
-async function createChatCompletion(
+async function requestChatCompletion(
   provider: ProviderConfig,
   apiKey: string,
-  payload: ChatCompletionRequest
+  payload: ChatCompletionRequest,
+  stream: boolean
 ) {
   const response = await fetch(`${normalizeBaseUrl(provider.baseUrl)}/chat/completions`, {
     method: "POST",
@@ -216,13 +209,24 @@ async function createChatCompletion(
     },
     body: JSON.stringify({
       ...payload,
-      stream: false
+      stream
     }),
     cache: "no-store"
   });
 
   const contentType = response.headers.get("content-type") || "";
   const rawText = await response.text();
+
+  return { response, contentType, rawText };
+}
+
+async function createChatCompletion(
+  provider: ProviderConfig,
+  apiKey: string,
+  payload: ChatCompletionRequest
+) {
+  const firstAttempt = await requestChatCompletion(provider, apiKey, payload, false);
+  let { response, contentType, rawText } = firstAttempt;
 
   if (!response.ok) {
     console.error("[ai.createChatCompletion] upstream request failed", {
@@ -241,7 +245,63 @@ async function createChatCompletion(
   }
 
   if (contentType.includes("text/event-stream")) {
-    return parseSseResponse(rawText);
+    const parsedText = await parseSseResponse(rawText);
+    if (parsedText) {
+      return parsedText;
+    }
+
+    console.warn("[ai.createChatCompletion] empty SSE response on stream=false, retrying with stream=true", {
+      provider: provider.label,
+      model: payload.model,
+      preview: rawText.slice(0, 1000)
+    });
+
+    const retryAttempt = await requestChatCompletion(provider, apiKey, payload, true);
+    response = retryAttempt.response;
+    contentType = retryAttempt.contentType;
+    rawText = retryAttempt.rawText;
+
+    if (!response.ok) {
+      console.error("[ai.createChatCompletion] upstream retry failed", {
+        provider: provider.label,
+        status: response.status,
+        contentType,
+        body: rawText.slice(0, 2000)
+      });
+
+      try {
+        const parsed = JSON.parse(rawText) as { error?: { message?: string } };
+        throw new Error(parsed.error?.message || `上游接口重试失败，状态码 ${response.status}。`);
+      } catch {
+        throw new Error(`上游接口重试失败，状态码 ${response.status}。`);
+      }
+    }
+
+    if (contentType.includes("text/event-stream")) {
+      const retriedParsedText = await parseSseResponse(rawText);
+      if (retriedParsedText) {
+        return retriedParsedText;
+      }
+    } else {
+      try {
+        return extractMessageText(JSON.parse(rawText));
+      } catch (error) {
+        console.error("[ai.createChatCompletion] failed to parse retry non-stream response", {
+          provider: provider.label,
+          contentType,
+          body: rawText.slice(0, 2000),
+          error
+        });
+        throw error;
+      }
+    }
+
+    console.error("[ai.createChatCompletion] empty SSE content after retry", {
+      provider: provider.label,
+      model: payload.model,
+      body: rawText.slice(0, 2000)
+    });
+    throw new Error("上游接口返回了流式响应，但没有实际文本内容。请检查中转站该模型的 OpenAI Chat 通道是否正常。");
   }
 
   try {
